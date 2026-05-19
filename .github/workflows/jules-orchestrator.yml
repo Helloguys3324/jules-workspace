@@ -121,22 +121,6 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Cache Node modules
-        uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: npm-${{ runner.os }}-${{ hashFiles('.automation/package.json') }}
-          restore-keys: |
-            npm-${{ runner.os }}-
-
-      - name: Install Core Dependencies
-        run: |
-          if [ -f ".automation/package.json" ]; then
-            cd .automation
-            npm ci --prefer-offline || npm install --prefer-offline
-            cd ..
-          fi
-
       - name: Run Jules Autonomous Session
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
