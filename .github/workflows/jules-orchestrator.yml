@@ -116,6 +116,8 @@ jobs:
           cp -r temp_control_center/.automation .
           rm -rf temp_control_center
 
+      # No external deps in jules-runner.js — pure Node.js
+      # If dependencies are added, restore actions/cache@v4 step
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
