@@ -1,0 +1,160 @@
+name: Jules Autonomous Orchestrator
+
+on:
+  workflow_dispatch:
+    inputs:
+      task_id:
+        description: 'Task ID'
+        required: false
+        type: string
+      prompt:
+        description: 'The task prompt for Jules'
+        required: true
+        type: string
+      branch:
+        description: 'Target branch'
+        required: false
+        default: 'main'
+        type: string
+      auto_approve:
+        description: 'Auto approve plan (true/false)'
+        required: false
+        default: 'true'
+        type: string
+      webhook_url:
+        description: 'Webhook URL (optional for serverless)'
+        required: false
+        type: string
+      issue_number:
+        description: 'GitHub Issue Number (for serverless mode)'
+        required: false
+        type: string
+      node_id:
+        description: 'Node ID (for DAG pipeline)'
+        required: false
+        type: string
+      graph_id:
+        description: 'Graph ID (for DAG pipeline)'
+        required: false
+        type: string
+
+  issues:
+    types: [labeled]
+
+  issue_comment:
+    types: [created]
+
+  schedule:
+    - cron: '*/15 * * * *' # Check queue every 15 minutes 24/7
+
+permissions:
+  issues: write
+  pull-requests: write
+  contents: write
+  actions: write
+
+jobs:
+  jules-scheduler:
+    # This job only runs on schedule or issue creation to find pending tasks and trigger them
+    if: github.event_name == 'schedule' || (github.event_name == 'issues' && github.event.label.name == 'jules-task')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Run Queue Scheduler (Serverless)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          JULES_API_KEY: ${{ secrets.JULES_API_KEY }}
+        run: |
+          # Check for pending issues with the 'jules-task' label
+          echo "Checking for pending Jules tasks in GitHub Issues..."
+          
+          # If triggered by a new issue label, run for that specific issue
+          if [ "${{ github.event_name }}" = "issues" ]; then
+            ISSUE_NUM="${{ github.event.issue.number }}"
+            echo "Triggered by label on Issue #$ISSUE_NUM"
+          else
+            # Search for the oldest open issue with label 'jules-task' and not running
+            ISSUE_NUM=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+              "https://api.github.com/repos/${{ github.repository }}/issues?labels=jules-task&state=open&sort=created&direction=asc" \
+              | jq -r '.[0].number // empty')
+          fi
+
+          if [ -z "$ISSUE_NUM" ] || [ "$ISSUE_NUM" = "null" ]; then
+            echo "No pending jules-task issues found."
+            exit 0
+          fi
+
+          echo "Found pending task in Issue #$ISSUE_NUM. Spawning execution runner..."
+          
+          # Dispatch the main execution workflow for this issue
+          curl -X POST -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/jules-orchestrator.yml/dispatches" \
+            -d "{\"ref\":\"main\",\"inputs\":{\"prompt\":\"issue-mode\",\"issue_number\":\"$ISSUE_NUM\"}}"
+
+  jules-run:
+    # This is the main execution job that communicates with Jules API
+    if: |
+      github.event_name == 'workflow_dispatch' || 
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '/approve'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Checkout Control Center Automation Tools
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.CONTROL_CENTER_REPO || github.repository }}
+          token: ${{ secrets.GITHUB_PAT || secrets.GITHUB_TOKEN }}
+          path: temp_control_center
+
+      - name: Inject Automation Core
+        run: |
+          cp -r temp_control_center/.automation .
+          rm -rf temp_control_center
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run Jules Autonomous Session
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_PAT: ${{ secrets.GITHUB_PAT || secrets.GITHUB_TOKEN }} # Use PAT if available for admin permissions
+          JULES_API_KEY: ${{ secrets.JULES_API_KEY }}
+          
+          # Pass event inputs if available
+          TASK_ID: ${{ github.event.inputs.task_id }}
+          NODE_ID: ${{ github.event.inputs.node_id }}
+          GRAPH_ID: ${{ github.event.inputs.graph_id }}
+          PROMPT: ${{ github.event.inputs.prompt }}
+          BRANCH: ${{ github.event.inputs.branch }}
+          AUTO_APPROVE: ${{ github.event.inputs.auto_approve }}
+          WEBHOOK_URL: ${{ github.event.inputs.webhook_url }}
+          ISSUE_NUMBER: ${{ github.event.inputs.issue_number }}
+          
+          # Pass event context if comment trigger
+          COMMENT_ISSUE_NUMBER: ${{ github.event.issue.number }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          # Configure target repo parameters
+          REPO_NAME=$(echo "${{ github.repository }}" | cut -d'/' -f2)
+          export GITHUB_OWNER=${{ github.repository_owner }}
+          export GITHUB_REPO=$REPO_NAME
+          
+          echo "Running Jules Orchestrator for $GITHUB_OWNER/$GITHUB_REPO..."
+          node .automation/scripts/jules-runner.js
+
+      - name: GitOps Sync state to database.json
+        if: always()
+        run: |
+          git config --global user.name "Jules Orchestrator Daemon"
+          git config --global user.email "jules-daemon@github.com"
+          git add -f .automation/database.json || true
+          git commit -m "GitOps Sync: cloud runner execution state [skip ci]" || true
+          git push origin main || true
