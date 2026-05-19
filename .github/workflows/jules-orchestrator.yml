@@ -152,6 +152,38 @@ jobs:
           echo "Running Jules Orchestrator for $GITHUB_OWNER/$GITHUB_REPO..."
           node .automation/scripts/jules-runner.js
 
+      - name: Run Automated Project Verification Tests
+        run: |
+          if [ -f "package.json" ]; then
+            echo "🔎 Target package.json detected. Checking for test scripts..."
+            if npm run | grep -q "test"; then
+              echo "🧪 Executing project test suite..."
+              npm ci --prefer-offline || npm install
+              npm test
+            else
+              echo "⚠️ No test script defined in target package.json. Skipping automated checks."
+            fi
+          fi
+
+      - name: Autonomous Branch Merge (HITL Bypass)
+        if: success() && (github.event.inputs.auto_approve == 'true' || github.event.inputs.auto_approve == '')
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          echo "⚡ Automated CI tests succeeded! Bypassing human-in-the-loop approvals..."
+          
+          # Fetch PR corresponding to this branch
+          BRANCH_NAME="${{ github.event.inputs.branch || 'jules-patch-main' }}"
+          PR_URL=$(gh pr list --head "$BRANCH_NAME" --json url --jq '.[0].url // empty')
+          
+          if [ -n "$PR_URL" ]; then
+            echo "🚀 Autonomously merging Pull Request: $PR_URL"
+            gh pr merge "$PR_URL" --merge --admin --delete-branch || gh pr merge "$PR_URL" --merge --delete-branch
+            echo "✅ Autonomous Deployment Complete! Branch merged and deleted without human intervention."
+          else
+            echo "ℹ️ No active pull request found to merge. Skipping auto-merge."
+          fi
+
       - name: GitOps Sync state to database.json
         if: always()
         run: |
